@@ -563,62 +563,6 @@ export default function NavigateScreen() {
             />
           </Pressable>
         </View>
-
-        {/* Offline Download Button */}
-        <View style={styles.offlineSection}>
-          {cachedTrails.has(item.id) ? (
-            <View style={styles.offlineStatus}>
-              <Feather name="download" size={16} color={theme.success} />
-              <ThemedText
-                style={[
-                  styles.offlineText,
-                  { color: theme.success, marginLeft: Spacing.xs },
-                ]}
-              >
-                Available Offline
-              </ThemedText>
-            </View>
-          ) : (
-            <Pressable
-              style={[
-                styles.downloadButton,
-                { backgroundColor: theme.backgroundSecondary },
-              ]}
-              onPress={() => downloadTrailForOffline(item)}
-              disabled={downloadingTrails.has(item.id)}
-            >
-              {downloadingTrails.has(item.id) ? (
-                <>
-                  <Feather
-                    name="loader"
-                    size={16}
-                    color={theme.tabIconDefault}
-                  />
-                  <ThemedText
-                    style={[
-                      styles.downloadButtonText,
-                      { color: theme.tabIconDefault },
-                    ]}
-                  >
-                    Downloading...
-                  </ThemedText>
-                </>
-              ) : (
-                <>
-                  <Feather name="download" size={16} color={theme.primary} />
-                  <ThemedText
-                    style={[
-                      styles.downloadButtonText,
-                      { color: theme.primary },
-                    ]}
-                  >
-                    Download for Offline
-                  </ThemedText>
-                </>
-              )}
-            </Pressable>
-          )}
-        </View>
       </Pressable>
     );
   };
