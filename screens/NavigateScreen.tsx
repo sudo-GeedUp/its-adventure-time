@@ -38,6 +38,23 @@ import { hasAccountAccess, CommunityAdventuresService } from "@/utils/firebase";
 type DifficultyFilter = "All" | "Easy" | "Moderate" | "Hard" | "Expert";
 type LandTypeFilter = "All" | "Public" | "Private";
 
+const DEFAULT_LOCATION = {
+  latitude: 38.5729,
+  longitude: -109.5898,
+};
+
+const getFallbackLocation = () => ({
+  coords: {
+    ...DEFAULT_LOCATION,
+    altitude: null,
+    accuracy: 0,
+    altitudeAccuracy: null,
+    heading: 0,
+    speed: 0,
+  },
+  timestamp: Date.now(),
+});
+
 export default function NavigateScreen() {
   const { theme } = useTheme();
   const navigation = useNavigation<any>();
@@ -47,7 +64,7 @@ export default function NavigateScreen() {
   // below re-subscribe when this flips, so signing in fills the screen
   // without needing a restart.
   const { isAuthenticated } = useAuth();
-  const [location, setLocation] = useState<any>(null);
+  const [location, setLocation] = useState<any>(getFallbackLocation());
   const [trails, setTrails] = useState<Trail[]>([]);
   const [filteredTrails, setFilteredTrails] = useState<Trail[]>([]);
   const [difficultyFilter, setDifficultyFilter] =
@@ -68,7 +85,7 @@ export default function NavigateScreen() {
 
   const requestLocationPermission = useCallback(async () => {
     try {
-      const { status } = await Location.requestForegroundPermissionsAsync();
+      const { status } = await Location.getForegroundPermissionsAsync();
       if (status === "granted") {
         const currentLocation = await Location.getCurrentPositionAsync({});
         setLocation(currentLocation);
@@ -78,20 +95,9 @@ export default function NavigateScreen() {
       console.error("Error getting location:", error);
     }
 
-    // Fallback: Use default location (Moab, Utah area where all trails are)
-    const defaultLocation = {
-      coords: {
-        latitude: 38.5729,
-        longitude: -109.5898,
-        altitude: null,
-        accuracy: 0,
-        altitudeAccuracy: null,
-        heading: 0,
-        speed: 0,
-      },
-      timestamp: Date.now(),
-    };
-    setLocation(defaultLocation);
+    // Fallback: Use default location (Moab, Utah area where all trails are);
+    // this keeps trail discovery functional even when GPS is denied or unavailable.
+    setLocation(getFallbackLocation());
   }, []);
 
   const updateCommunityTrailsData = useCallback(
@@ -168,32 +174,37 @@ export default function NavigateScreen() {
   }, [updateCommunityTrailsData, isAuthenticated]);
 
   const loadNearbyTrails = useCallback(async () => {
-    if (!location) return;
+    const safeLocation = location ?? getFallbackLocation();
 
     setIsLoading(true);
     setError(null);
 
     try {
-      let nearbyTrails = getTrailsNearLocation(location.coords, 50);
+      let nearbyTrails = getTrailsNearLocation(safeLocation.coords, 50);
 
       // Merge offline cached trails
       try {
-        const cachedTrails = await OfflineMapsManager.getTrailsNearLocation(
-          location.coords,
+        const cachedTrailsNearby = await OfflineMapsManager.getTrailsNearLocation(
+          safeLocation.coords,
           50,
         );
         const trailMap = new Map<string, Trail>();
         nearbyTrails.forEach((t) => trailMap.set(t.id, t));
-        cachedTrails.forEach((t) => trailMap.set(t.id, t as Trail));
+        cachedTrailsNearby.forEach((t) => trailMap.set(t.id, t as Trail));
         nearbyTrails = Array.from(trailMap.values());
       } catch (cacheError) {
         console.error("Error loading cached trails:", cacheError);
       }
 
-      const allTrails = [...nearbyTrails, ...communityTrails];
-      const sortedByDistance = allTrails.sort((a, b) => {
-        const distA = calculateDistance(location.coords, a.location);
-        const distB = calculateDistance(location.coords, b.location);
+      const dedupedTrails = Array.from(
+        new Map(
+          [...nearbyTrails, ...communityTrails].map((trail) => [trail.id, trail]),
+        ).values(),
+      );
+
+      const sortedByDistance = dedupedTrails.sort((a, b) => {
+        const distA = calculateDistance(safeLocation.coords, a.location);
+        const distB = calculateDistance(safeLocation.coords, b.location);
         return distA - distB;
       });
       setTrails(sortedByDistance);
