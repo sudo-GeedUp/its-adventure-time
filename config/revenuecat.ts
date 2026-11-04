@@ -8,7 +8,7 @@ import { Platform } from "react-native";
 // RevenueCat API Keys
 // Use platform-specific public SDK keys from the RevenueCat dashboard.
 // iOS production keys start with `appl_`; Android keys start with `goog_`.
-// Test Store keys (`test_`) will crash in release builds and must not be used.
+// Test Store keys (`test_`) are intentionally rejected in release builds.
 const REVENUECAT_IOS_KEY = process.env.EXPO_PUBLIC_REVENUECAT_IOS_KEY || "";
 const REVENUECAT_ANDROID_KEY =
   process.env.EXPO_PUBLIC_REVENUECAT_ANDROID_KEY || "";
@@ -17,6 +17,7 @@ const isTestApiKey = (key: string | undefined) =>
   !!key && key.startsWith("test_");
 
 let revenueCatConfigured = false;
+let initializationPromise: Promise<boolean> | null = null;
 
 export const isRevenueCatConfigured = () => revenueCatConfigured;
 
@@ -44,53 +45,60 @@ export const ENTITLEMENT_IDS = {
   PREMIUM: "It's Adventure Time Pro",
 };
 
-export const initializeRevenueCat = async () => {
-  try {
-    // RevenueCat is not supported on web
-    if (Platform.OS === "web") {
-      console.log("RevenueCat not available on web platform");
-      return false;
-    }
-
-    const apiKey = Platform.select({
-      ios: REVENUECAT_IOS_KEY,
-      android: REVENUECAT_ANDROID_KEY,
-    });
-
-    if (!apiKey) {
-      console.warn(
-        "RevenueCat API key not configured; subscription features disabled.",
-      );
-      return false;
-    }
-
-    if (isTestApiKey(apiKey)) {
-      console.warn(
-        "RevenueCat Test Store API key detected in a release build. Skipping RevenueCat to prevent a crash. Set EXPO_PUBLIC_REVENUECAT_IOS_KEY to your iOS public SDK key (appl_...).",
-      );
-      return false;
-    }
-
-    // Configure RevenueCat
-    Purchases.setLogLevel(__DEV__ ? LOG_LEVEL.VERBOSE : LOG_LEVEL.INFO);
-
-    await Purchases.configure({ apiKey });
-    revenueCatConfigured = true;
-
-    return true;
-  } catch (error) {
-    console.error("Failed to initialize RevenueCat:", error);
+export const initializeRevenueCat = async (): Promise<boolean> => {
+  if (revenueCatConfigured) return true;
+  if (Platform.OS === "web") {
+    console.log("RevenueCat not available on web platform");
     return false;
   }
+  if (initializationPromise) return initializationPromise;
+
+  initializationPromise = (async () => {
+    try {
+      const apiKey = Platform.select({
+        ios: REVENUECAT_IOS_KEY,
+        android: REVENUECAT_ANDROID_KEY,
+      });
+
+      if (!apiKey) {
+        console.warn(
+          "RevenueCat API key not configured; subscription features disabled.",
+        );
+        return false;
+      }
+
+      if (isTestApiKey(apiKey)) {
+        console.warn(
+          "RevenueCat Test Store API key detected in a release build. Set the platform's public RevenueCat SDK key.",
+        );
+        return false;
+      }
+
+      Purchases.setLogLevel(__DEV__ ? LOG_LEVEL.VERBOSE : LOG_LEVEL.INFO);
+      await Purchases.configure({ apiKey });
+      revenueCatConfigured = true;
+      return true;
+    } catch (error) {
+      console.error("Failed to initialize RevenueCat:", error);
+      return false;
+    } finally {
+      initializationPromise = null;
+    }
+  })();
+
+  return initializationPromise;
 };
 
 export const getOfferings = async (): Promise<PurchasesOffering | null> => {
   try {
+    // The paywall can be opened before SubscriptionProvider finishes its async
+    // setup. Ensure the SDK is configured here too, sharing the same in-flight
+    // promise so the SDK is never configured twice during that race.
+    const initialized = revenueCatConfigured || (await initializeRevenueCat());
+    if (!initialized) return null;
+
     const offerings = await Purchases.getOfferings();
-    if (offerings.current !== null) {
-      return offerings.current;
-    }
-    return null;
+    return offerings.current ?? null;
   } catch (error) {
     console.error("Error fetching offerings:", error);
     return null;
@@ -112,10 +120,11 @@ export const purchaseSubscription = async (
       );
       throw new Error(SUBSCRIPTION_UNAVAILABLE_MESSAGE);
     }
+
     const offerings = await getOfferings();
     if (!offerings) {
       console.error(
-        "No RevenueCat offerings returned. Verify the offering is linked to products in App Store Connect.",
+        "No RevenueCat offerings returned. Verify the offering is linked to products in App Store Connect / Play Console.",
       );
       throw new Error(SUBSCRIPTION_UNAVAILABLE_MESSAGE);
     }
@@ -126,7 +135,7 @@ export const purchaseSubscription = async (
 
     if (!packageToBuy) {
       console.error(
-        `Product "${productIdentifier}" missing from the current offering. Check the product ID matches App Store Connect / RevenueCat and is approved.`,
+        `Product "${productIdentifier}" missing from the current offering. Check that the product ID matches the store and is included in the active RevenueCat offering.`,
       );
       throw new Error(SUBSCRIPTION_UNAVAILABLE_MESSAGE);
     }
@@ -152,8 +161,7 @@ export const restorePurchases = async (): Promise<CustomerInfo | null> => {
         getRevenueCatInitError() || "RevenueCat is not configured.",
       );
     }
-    const customerInfo = await Purchases.restorePurchases();
-    return customerInfo;
+    return await Purchases.restorePurchases();
   } catch (error) {
     console.error("Restore error:", error);
     throw error;
