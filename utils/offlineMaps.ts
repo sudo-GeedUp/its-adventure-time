@@ -27,7 +27,7 @@ interface MapTile {
 }
 
 export class OfflineMapsManager {
-  // Cache trail data for offline use
+  // Cache trail metadata for offline reference. This does not download map imagery.
   static async cacheTrail(trail: Trail): Promise<void> {
     try {
       const existingTrails = await this.getCachedTrails();
@@ -37,7 +37,6 @@ export class OfflineMapsManager {
         isDownloaded: true,
       };
 
-      // Remove existing trail with same ID if exists
       const filteredTrails = existingTrails.filter((t) => t.id !== trail.id);
       filteredTrails.push(offlineTrail);
 
@@ -45,9 +44,10 @@ export class OfflineMapsManager {
         OFFLINE_TRAILS_KEY,
         JSON.stringify(filteredTrails),
       );
-      console.log(`Trail "${trail.name}" cached for offline use`);
+      console.log(`Trail "${trail.name}" saved for offline reference`);
     } catch (error) {
       console.error("Error caching trail for offline use:", error);
+      throw error;
     }
   }
 
@@ -85,6 +85,7 @@ export class OfflineMapsManager {
       console.log(`Trail "${trailId}" removed from cache`);
     } catch (error) {
       console.error("Error removing cached trail:", error);
+      throw error;
     }
   }
 
@@ -139,6 +140,7 @@ export class OfflineMapsManager {
       );
     } catch (error) {
       console.error("Error caching map tile:", error);
+      throw error;
     }
   }
 
@@ -158,7 +160,6 @@ export class OfflineMapsManager {
     try {
       const thirtyDaysAgo = Date.now() - 30 * 24 * 60 * 60 * 1000;
 
-      // Clear old trails
       const trails = await this.getCachedTrails();
       const validTrails = trails.filter(
         (trail) => trail.cachedAt > thirtyDaysAgo,
@@ -168,7 +169,6 @@ export class OfflineMapsManager {
         JSON.stringify(validTrails),
       );
 
-      // Clear old map tiles
       const tiles = await this.getCachedMapTiles();
       const validTiles = tiles.filter((tile) => tile.cachedAt > thirtyDaysAgo);
       await AsyncStorage.setItem(
@@ -179,15 +179,21 @@ export class OfflineMapsManager {
       console.log("Old offline cache data cleared");
     } catch (error) {
       console.error("Error clearing old cache data:", error);
+      throw error;
     }
   }
 
   static async clearAllCache(): Promise<void> {
-    await AsyncStorage.multiRemove([
-      OFFLINE_TRAILS_KEY,
-      OFFLINE_MAP_TILES_KEY,
-      OFFLINE_SELECTED_ROUTE_KEY,
-    ]);
+    try {
+      await AsyncStorage.multiRemove([
+        OFFLINE_TRAILS_KEY,
+        OFFLINE_MAP_TILES_KEY,
+        OFFLINE_SELECTED_ROUTE_KEY,
+      ]);
+    } catch (error) {
+      console.error("Error clearing offline cache:", error);
+      throw error;
+    }
   }
 
   // Cache the currently selected navigation route for offline navigation
@@ -215,6 +221,7 @@ export class OfflineMapsManager {
       console.log(`Selected route "${title}" cached for offline use`);
     } catch (error) {
       console.error("Error caching selected route:", error);
+      throw error;
     }
   }
 
@@ -236,6 +243,7 @@ export class OfflineMapsManager {
       console.log("Cached selected route cleared");
     } catch (error) {
       console.error("Error clearing cached selected route:", error);
+      throw error;
     }
   }
 
