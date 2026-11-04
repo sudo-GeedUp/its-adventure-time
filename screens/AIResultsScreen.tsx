@@ -1,77 +1,61 @@
-import React, { useState, useEffect, useCallback, useRef } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
-  View,
-  StyleSheet,
-  Image,
   ActivityIndicator,
-  Pressable,
-  Switch,
   Alert,
+  Image,
+  Pressable,
+  StyleSheet,
+  Switch,
+  View,
 } from "react-native";
-import { useRoute, useNavigation, RouteProp } from "@react-navigation/native";
+import { RouteProp, useNavigation, useRoute } from "@react-navigation/native";
 import { Feather } from "@expo/vector-icons";
 import { ScreenScrollView } from "@/components/ScreenScrollView";
 import ThemedText from "@/components/ThemedText";
 import { useTheme } from "@/hooks/useTheme";
 import { AIScanStackParamList } from "@/navigation/AIScanStackNavigator";
-import { Spacing, BorderRadius, Typography } from "@/constants/theme";
+import { BorderRadius, Spacing, Typography } from "@/constants/theme";
 import { storage } from "@/utils/storage";
 import { authService } from "@/services/authService";
 import { analyzeRecoverySituation, RecoveryAnalysis } from "@/services/openai";
-import { ScanSubmissionsService, hasAccountAccess } from "@/utils/firebase";
+import { hasAccountAccess, ScanSubmissionsService } from "@/utils/firebase";
 
-type AIResultsScreenRouteProp = RouteProp<AIScanStackParamList, "AIResults">;
+ type ResultsRoute = RouteProp<AIScanStackParamList, "AIResults">;
 
-// Cloud Storage is unavailable, and no OTA-safe image resizer is installed.
 const MAX_SCAN_IMAGE_BASE64_LENGTH = 1_000_000;
 
+function severityLabel(severity: RecoveryAnalysis["severity"]): string {
+  switch (severity) {
+    case "low":
+      return "Lower visible risk";
+    case "moderate":
+      return "Use caution";
+    case "high":
+      return "High risk — get professional help";
+    case "critical":
+      return "Critical — stop and get professional help";
+  }
+}
+
 export default function AIResultsScreen() {
-  const route = useRoute<AIResultsScreenRouteProp>();
+  const route = useRoute<ResultsRoute>();
   const navigation = useNavigation<any>();
   const { theme } = useTheme();
+  const { imageUri, imageBase64 } = route.params;
   const [isAnalyzing, setIsAnalyzing] = useState(true);
-  const [analysis, setAnalysis] = useState<any>(null);
-  const [rawResult, setRawResult] = useState<RecoveryAnalysis | null>(null);
+  const [analysis, setAnalysis] = useState<RecoveryAnalysis | null>(null);
+  const [analysisError, setAnalysisError] = useState<string | null>(null);
   const [shareWithCommunity, setShareWithCommunity] = useState(false);
+  const [sharing, setSharing] = useState(false);
   const [hasShared, setHasShared] = useState(false);
   const scanIdRef = useRef(Date.now().toString());
 
-  const { imageUri, imageBase64 } = route.params;
-
   const performAnalysis = useCallback(async () => {
     setIsAnalyzing(true);
-
+    setAnalysisError(null);
     try {
       const result = await analyzeRecoverySituation(imageUri);
-
-      // Transform the new API response to match the existing UI format
-      const transformedResult = {
-        situationType: result.situation,
-        difficulty: result.estimatedDifficulty,
-        equipment: result.requiredEquipment,
-        steps: result.recommendations.map((rec, index) => ({
-          title: `Step ${index + 1}`,
-          description: rec,
-        })),
-        tips: result.safetyWarnings,
-        warning:
-          result.severity === "critical" || result.severity === "high"
-            ? "This is a high-risk situation. Consider requesting professional assistance."
-            : undefined,
-        recoverability:
-          result.severity === "low"
-            ? 0.9
-            : result.severity === "moderate"
-              ? 0.7
-              : result.severity === "high"
-                ? 0.5
-                : 0.3,
-        confidence: 0.85,
-      };
-
-      setRawResult(result);
-      setAnalysis(transformedResult);
-
+      setAnalysis(result);
       await storage.addScanHistory({
         id: scanIdRef.current,
         imageUri,
@@ -79,139 +63,89 @@ export default function AIResultsScreen() {
         situationType: result.situation,
         analysis: JSON.stringify(result),
       });
-    } catch (error: any) {
+    } catch (error) {
       console.error("Analysis error:", error);
-      setAnalysis({
-        situationType: "Analysis Error",
-        difficulty: "Moderate",
-        steps: [
-          {
-            title: "Assess Safely",
-            description:
-              "Exit the vehicle and carefully assess the terrain and vehicle position.",
-          },
-        ],
-        warning:
-          "We couldn't analyze this photo right now. Check your connection and try again, or use the recovery guides below.",
-      });
+      setAnalysis(null);
+      setAnalysisError(
+        error instanceof Error
+          ? error.message
+          : "We couldn't analyze this photo. Try again or use the recovery guides.",
+      );
     } finally {
       setIsAnalyzing(false);
     }
   }, [imageUri]);
 
   useEffect(() => {
-    performAnalysis();
+    void performAnalysis();
   }, [performAnalysis]);
 
-  const handleRequestHelp = () => {
-    // Navigate to Explore tab where users can find nearby offroaders for help
-    (navigation as any).navigate("NearbyTab");
-  };
-
-  const handleShareToggle = async (value: boolean) => {
-    if (hasShared || !value) {
+  const handleShareToggle = async (enabled: boolean) => {
+    if (!enabled || hasShared) {
       setShareWithCommunity(hasShared);
       return;
     }
-
-    if (!hasAccountAccess() || !rawResult) {
+    if (!hasAccountAccess() || !analysis) {
       setShareWithCommunity(false);
+      Alert.alert("Sign in required", "Sign in to share a scan with the community.");
+      return;
+    }
+    if (!imageBase64 || imageBase64.length > MAX_SCAN_IMAGE_BASE64_LENGTH) {
+      setShareWithCommunity(false);
+      Alert.alert(
+        "Photo can't be shared",
+        "This photo is missing or too large to share. Your analysis is still available on this device.",
+      );
       return;
     }
 
+    setSharing(true);
     try {
       const userProfile = await storage.getUserProfile();
-      const firebaseUser = authService.getCurrentUser();
-      const userId = firebaseUser?.uid || userProfile?.id;
-      if (!userId) {
-        setShareWithCommunity(false);
-        Alert.alert(
-          "Sign In Required",
-          "Please sign in to share your scan with the community.",
-        );
-        return;
-      }
+      const userId = authService.getCurrentUser()?.uid;
+      if (!userId) throw new Error("Please sign in again before sharing.");
 
-      const difficultyToScore: Record<string, number> = {
+      const difficultyScore: Record<string, number> = {
         Easy: 2,
         Moderate: 4,
-        Hard: 7,
+        Difficult: 7,
         Expert: 10,
       };
-      const difficultyScore =
-        difficultyToScore[rawResult.estimatedDifficulty] || 5;
-      if (!imageBase64) {
-        throw new Error("The scan image is unavailable for sharing.");
-      }
-      if (imageBase64.length > MAX_SCAN_IMAGE_BASE64_LENGTH) {
-        setShareWithCommunity(false);
-        Alert.alert(
-          "Photo Too Large",
-          "This photo is too large to share with the community. Please take or choose a smaller photo.",
-        );
-        return;
-      }
-
       const submissionId = await ScanSubmissionsService.submitScan({
-        situationType: rawResult.situation,
-        description: rawResult.recommendations.join("\n"),
-        difficultyScore,
+        situationType: analysis.situation,
+        description: [...analysis.recommendations, ...analysis.safetyWarnings].join("\n"),
+        difficultyScore: difficultyScore[analysis.estimatedDifficulty] ?? 5,
         userName: userProfile?.name || "Anonymous",
         userId,
       });
-      const sharedImageDataUri = `data:image/jpeg;base64,${imageBase64}`;
-      // The metadata must exist before this write so its ownership rule can pass.
       await ScanSubmissionsService.submitScanImage(
         submissionId,
-        sharedImageDataUri,
+        `data:image/jpeg;base64,${imageBase64}`,
       );
       await storage.markScanShared(scanIdRef.current, submissionId);
-
       setHasShared(true);
       setShareWithCommunity(true);
-    } catch (error: unknown) {
+    } catch (error) {
       console.error("Error sharing scan:", error);
       setShareWithCommunity(false);
-
-      let errorDetails = "Unknown error";
-      if (error instanceof Error) {
-        errorDetails = error.message;
-      } else if (typeof error === "string") {
-        errorDetails = error;
-      } else if (error && typeof error === "object") {
-        const code =
-          "code" in error && typeof error.code === "string" ? error.code : "";
-        const message =
-          "message" in error && typeof error.message === "string"
-            ? error.message
-            : "";
-        errorDetails =
-          [code, message].filter(Boolean).join(": ") || errorDetails;
-      }
-
       Alert.alert(
-        "Error",
-        `Could not share scan with community.\n\n${errorDetails}`,
+        "Couldn't share scan",
+        error instanceof Error ? error.message : "Please try again later.",
       );
+    } finally {
+      setSharing(false);
     }
   };
 
   if (isAnalyzing) {
     return (
-      <View
-        style={[
-          styles.loadingContainer,
-          { backgroundColor: theme.backgroundRoot },
-        ]}
-      >
+      <View style={[styles.centered, { backgroundColor: theme.backgroundRoot }]}>
         <ActivityIndicator size="large" color={theme.primary} />
-        <ThemedText style={[Typography.h4, styles.loadingText]}>
-          Analyzing your situation...
+        <ThemedText style={[Typography.h4, styles.loadingTitle]}>
+          Analyzing your photo…
         </ThemedText>
-        <ThemedText
-          style={[styles.loadingDescription, { color: theme.tabIconDefault }]}
-        >
-          Our AI is examining the photo and generating recovery recommendations
+        <ThemedText style={{ color: theme.tabIconDefault, textAlign: "center" }}>
+          AI can miss hazards. Treat any suggestions as general information, not a safety assessment.
         </ThemedText>
       </View>
     );
@@ -219,308 +153,153 @@ export default function AIResultsScreen() {
 
   if (!analysis) {
     return (
-      <View style={styles.errorContainer}>
-        <ThemedText>Unable to analyze image</ThemedText>
+      <View style={[styles.centered, { backgroundColor: theme.backgroundRoot }]}>
+        <Feather name="alert-circle" size={42} color={theme.error} />
+        <ThemedText style={[Typography.h4, styles.loadingTitle]}>
+          Analysis unavailable
+        </ThemedText>
+        <ThemedText style={[styles.errorMessage, { color: theme.tabIconDefault }]}>
+          {analysisError || "We couldn't analyze this photo."}
+        </ThemedText>
+        <Pressable
+          accessibilityRole="button"
+          style={[styles.actionButton, { backgroundColor: theme.primary }]}
+          onPress={() => void performAnalysis()}
+        >
+          <ThemedText style={{ color: theme.buttonText, fontWeight: "700" }}>
+            Try Again
+          </ThemedText>
+        </Pressable>
+        <Pressable
+          accessibilityRole="button"
+          style={styles.textButton}
+          onPress={() => navigation.navigate("Guides")}
+        >
+          <ThemedText style={{ color: theme.primary }}>Open Recovery Guides</ThemedText>
+        </Pressable>
       </View>
     );
   }
 
-  const difficultyColor =
-    analysis.difficulty === "Easy"
-      ? theme.success
-      : analysis.difficulty === "Moderate"
+  const severityColor =
+    analysis.severity === "critical" || analysis.severity === "high"
+      ? theme.error
+      : analysis.severity === "moderate"
         ? theme.warning
-        : theme.error;
-
-  const confidencePercent = analysis.confidence
-    ? Math.round(analysis.confidence * 100)
-    : "N/A";
-
-  const recoverabilityPercent = analysis.recoverability
-    ? Math.round(analysis.recoverability * 100)
-    : "N/A";
-
-  const recoverabilityColor =
-    analysis.recoverability !== undefined
-      ? analysis.recoverability >= 0.85
-        ? theme.success
-        : analysis.recoverability >= 0.65
-          ? theme.warning
-          : theme.error
-      : theme.tabIconDefault;
+        : theme.success;
 
   return (
     <ScreenScrollView>
-      <Image
-        source={{ uri: imageUri }}
-        style={styles.image}
-        resizeMode="cover"
-      />
+      <Image source={{ uri: imageUri }} style={styles.image} resizeMode="cover" />
 
-      <View
-        style={[
-          styles.summaryCard,
-          { backgroundColor: theme.backgroundDefault },
-        ]}
-      >
-        <View style={styles.summaryHeader}>
-          <View style={styles.titleSection}>
-            <ThemedText style={[Typography.h3, styles.situationType]}>
-              {analysis.situationType}
-            </ThemedText>
-            <View style={styles.badgesRow}>
-              <View
-                style={[
-                  styles.badge,
-                  { backgroundColor: difficultyColor + "20" },
-                ]}
-              >
-                <ThemedText
-                  style={[styles.badgeText, { color: difficultyColor }]}
-                >
-                  {analysis.difficulty}
-                </ThemedText>
-              </View>
-              {analysis.confidence !== undefined && (
-                <View
-                  style={[
-                    styles.badge,
-                    { backgroundColor: theme.primary + "20" },
-                  ]}
-                >
-                  <ThemedText
-                    style={[styles.badgeText, { color: theme.primary }]}
-                  >
-                    {confidencePercent}% Confident
-                  </ThemedText>
-                </View>
-              )}
-            </View>
-          </View>
-          <Feather name="alert-circle" size={48} color={theme.warning} />
+      <View style={[styles.summary, { backgroundColor: theme.backgroundDefault }]}>
+        <ThemedText style={[Typography.h3, styles.situation]}>
+          {analysis.situation}
+        </ThemedText>
+        <View style={[styles.severityBadge, { backgroundColor: severityColor + "20" }]}>
+          <Feather name="alert-triangle" size={18} color={severityColor} />
+          <ThemedText style={[styles.severityText, { color: severityColor }]}>
+            {severityLabel(analysis.severity)}
+          </ThemedText>
         </View>
-        {analysis.recoverability !== undefined && (
-          <View style={[styles.recoverabilityBar, { marginTop: Spacing.lg }]}>
-            <View style={styles.recoverabilityLabel}>
-              <ThemedText
-                style={[Typography.label, { color: recoverabilityColor }]}
-              >
-                Recoverability Score
-              </ThemedText>
-              <ThemedText
-                style={[Typography.h3, { color: recoverabilityColor }]}
-              >
-                {recoverabilityPercent}%
-              </ThemedText>
-            </View>
-            <View
-              style={[
-                styles.progressBar,
-                { backgroundColor: theme.backgroundSecondary },
-              ]}
-            >
-              <View
-                style={[
-                  styles.progressFill,
-                  {
-                    width: `${typeof recoverabilityPercent === "number" ? recoverabilityPercent : 0}%`,
-                    backgroundColor: recoverabilityColor,
-                  },
-                ]}
-              />
-            </View>
-            <ThemedText
-              style={[
-                styles.recoverabilityText,
-                { color: theme.tabIconDefault, marginTop: Spacing.md },
-              ]}
-            >
-              {analysis.recoverability >= 0.85
-                ? "Vehicle is likely recoverable with proper technique"
-                : analysis.recoverability >= 0.65
-                  ? "Vehicle may be recoverable, professional help recommended"
-                  : "Professional recovery equipment/service strongly recommended"}
-            </ThemedText>
-          </View>
-        )}
+        <ThemedText style={[styles.limitation, { color: theme.tabIconDefault }]}>
+          Photo-based AI can be wrong and cannot verify vehicle stability, hidden damage, equipment ratings, or anchor points. No recoverability percentage or confidence score is provided because a photo cannot establish those reliably.
+        </ThemedText>
       </View>
 
-      {analysis.equipment && analysis.equipment.length > 0 && (
+      {analysis.severity === "high" || analysis.severity === "critical" ? (
+        <View style={[styles.urgentWarning, { backgroundColor: theme.error + "18", borderColor: theme.error }]}>
+          <ThemedText style={[Typography.label, { color: theme.error, marginBottom: Spacing.xs }]}>
+            Stop and prioritize safety
+          </ThemedText>
+          <ThemedText style={{ color: theme.text, lineHeight: 22 }}>
+            Keep people clear of the vehicle and any recovery lines. Do not attempt a recovery based only on this analysis; contact a qualified recovery professional or emergency services if anyone is injured or in immediate danger.
+          </ThemedText>
+        </View>
+      ) : null}
+
+      {analysis.requiredEquipment.length > 0 && (
         <View style={styles.section}>
           <ThemedText style={[Typography.h4, styles.sectionTitle]}>
-            Recommended Equipment
+            Possible Equipment
           </ThemedText>
-          <View
-            style={[
-              styles.equipmentGrid,
-              { backgroundColor: theme.backgroundDefault },
-            ]}
-          >
-            {analysis.equipment.map((item: string, index: number) => (
-              <View key={index} style={styles.equipmentItem}>
-                <Feather name="check-circle" size={16} color={theme.success} />
-                <ThemedText
-                  style={[styles.equipmentText, { marginLeft: Spacing.sm }]}
-                >
-                  {item}
-                </ThemedText>
+          <ThemedText style={[styles.sectionNote, { color: theme.tabIconDefault }]}>
+            AI suggestions only; verify that equipment is suitable and rated for your situation.
+          </ThemedText>
+          <View style={[styles.card, { backgroundColor: theme.backgroundDefault }]}>
+            {analysis.requiredEquipment.map((item, index) => (
+              <View key={`${item}-${index}`} style={styles.listItem}>
+                <Feather name="tool" size={17} color={theme.primary} />
+                <ThemedText style={styles.listText}>{item}</ThemedText>
               </View>
             ))}
           </View>
         </View>
       )}
 
-      <View style={styles.section}>
-        <ThemedText style={[Typography.h4, styles.sectionTitle]}>
-          Recovery Steps
-        </ThemedText>
-        {analysis.steps.map((step: any, index: number) => (
-          <View
-            key={index}
-            style={[
-              styles.stepCard,
-              { backgroundColor: theme.backgroundDefault },
-            ]}
-          >
-            <View
-              style={[styles.stepNumber, { backgroundColor: theme.primary }]}
-            >
-              <ThemedText
-                style={[styles.stepNumberText, { color: theme.buttonText }]}
-              >
-                {index + 1}
-              </ThemedText>
-            </View>
-            <View style={styles.stepContent}>
-              <View style={styles.stepHeader}>
-                <ThemedText style={[Typography.label, styles.stepTitle]}>
-                  {step.title}
-                </ThemedText>
-                {step.timeEstimate && (
-                  <ThemedText
-                    style={[
-                      styles.timeEstimate,
-                      { color: theme.tabIconDefault },
-                    ]}
-                  >
-                    ~{step.timeEstimate}
-                  </ThemedText>
-                )}
-              </View>
-              <ThemedText style={styles.stepDescription}>
-                {step.description}
-              </ThemedText>
-            </View>
-          </View>
-        ))}
-      </View>
-
-      {analysis.tips && analysis.tips.length > 0 && (
+      {analysis.recommendations.length > 0 && (
         <View style={styles.section}>
           <ThemedText style={[Typography.h4, styles.sectionTitle]}>
-            Pro Tips
+            General Guidance
           </ThemedText>
-          {analysis.tips.map((tip: string, index: number) => (
-            <View
-              key={index}
-              style={[
-                styles.tipCard,
-                { backgroundColor: theme.backgroundDefault },
-              ]}
-            >
-              <Feather name="zap" size={20} color={theme.primary} />
-              <ThemedText style={[styles.tipText, { marginLeft: Spacing.md }]}>
-                {tip}
-              </ThemedText>
+          {analysis.recommendations.map((recommendation, index) => (
+            <View key={`${index}-${recommendation}`} style={[styles.stepCard, { backgroundColor: theme.backgroundDefault }]}>
+              <View style={[styles.stepNumber, { backgroundColor: theme.primary }]}>
+                <ThemedText style={{ color: theme.buttonText, fontWeight: "700" }}>{index + 1}</ThemedText>
+              </View>
+              <ThemedText style={styles.listText}>{recommendation}</ThemedText>
             </View>
           ))}
         </View>
       )}
 
-      {analysis.warning ? (
-        <View
-          style={[
-            styles.warningSection,
-            { backgroundColor: theme.error + "15", borderColor: theme.error },
-          ]}
-        >
-          <View style={styles.warningHeader}>
-            <Feather name="alert-triangle" size={24} color={theme.error} />
-            <ThemedText
-              style={[
-                Typography.h4,
-                { marginLeft: Spacing.sm, color: theme.error },
-              ]}
-            >
-              Warning
-            </ThemedText>
-          </View>
-          <ThemedText style={styles.warningText}>{analysis.warning}</ThemedText>
-        </View>
-      ) : null}
-
-      <View
-        style={[
-          styles.disclaimerSection,
-          { backgroundColor: theme.backgroundSecondary },
-        ]}
-      >
-        <Feather name="info" size={20} color={theme.tabIconDefault} />
-        <ThemedText
-          style={[styles.disclaimerText, { color: theme.tabIconDefault }]}
-        >
-          AI suggestions are for guidance only. Always use professional judgment
-          and prioritize safety. If unsure, request professional assistance.
-        </ThemedText>
-      </View>
-
-      {imageBase64 && (
-        <View
-          style={[
-            styles.shareRow,
-            { backgroundColor: theme.backgroundDefault },
-          ]}
-        >
-          <View style={styles.shareTextContainer}>
-            <ThemedText style={Typography.label}>
-              Share with community
-            </ThemedText>
-            <ThemedText
-              style={[styles.shareDescription, { color: theme.tabIconDefault }]}
-            >
-              {hasShared
-                ? "Your scan is eligible for Stuck of the Week."
-                : "Share your scan for Stuck of the Week."}
-            </ThemedText>
-          </View>
-          <Switch
-            value={shareWithCommunity}
-            onValueChange={handleShareToggle}
-            disabled={hasShared || !hasAccountAccess()}
-            trackColor={{
-              false: theme.backgroundSecondary,
-              true: theme.primary,
-            }}
-            thumbColor={
-              shareWithCommunity ? theme.primary : theme.tabIconDefault
-            }
-          />
+      {analysis.safetyWarnings.length > 0 && (
+        <View style={styles.section}>
+          <ThemedText style={[Typography.h4, styles.sectionTitle]}>Safety cautions</ThemedText>
+          {analysis.safetyWarnings.map((warning, index) => (
+            <View key={`${index}-${warning}`} style={[styles.warningCard, { backgroundColor: theme.warning + "15" }]}>
+              <Feather name="alert-triangle" size={18} color={theme.warning} />
+              <ThemedText style={[styles.listText, { marginLeft: Spacing.sm }]}>{warning}</ThemedText>
+            </View>
+          ))}
         </View>
       )}
 
+      <View style={[styles.disclaimer, { backgroundColor: theme.backgroundSecondary }]}>
+        <Feather name="info" size={20} color={theme.tabIconDefault} />
+        <ThemedText style={[styles.disclaimerText, { color: theme.tabIconDefault }]}>
+          This is general information, not professional recovery advice. Never get under an unstable vehicle or stand in line with a tensioned strap or winch. Stop if anything is uncertain.
+        </ThemedText>
+      </View>
+
+      {imageBase64 ? (
+        <View style={[styles.shareRow, { backgroundColor: theme.backgroundDefault }]}>
+          <View style={styles.shareCopy}>
+            <ThemedText style={Typography.label}>Share with community</ThemedText>
+            <ThemedText style={[styles.sectionNote, { color: theme.tabIconDefault }]}>
+              {hasShared ? "Shared with the community." : "Share this photo and analysis publicly."}
+            </ThemedText>
+          </View>
+          {sharing ? <ActivityIndicator color={theme.primary} /> : (
+            <Switch
+              value={shareWithCommunity}
+              onValueChange={(value) => void handleShareToggle(value)}
+              disabled={hasShared || !hasAccountAccess()}
+              trackColor={{ false: theme.backgroundSecondary, true: theme.primary }}
+              thumbColor={shareWithCommunity ? theme.primary : theme.tabIconDefault}
+            />
+          )}
+        </View>
+      ) : null}
+
       <Pressable
-        style={[styles.helpButton, { backgroundColor: theme.error }]}
-        onPress={handleRequestHelp}
-        android_ripple={{ color: "rgba(255,255,255,0.2)" }}
+        accessibilityRole="button"
+        style={[styles.actionButton, styles.helpButton, { backgroundColor: theme.error }]}
+        onPress={() => navigation.navigate("NearbyTab")}
       >
-        <Feather name="alert-circle" size={24} color={theme.buttonText} />
-        <ThemedText
-          style={[
-            Typography.button,
-            { color: theme.buttonText, marginLeft: Spacing.md },
-          ]}
-        >
-          Request Help Now
+        <Feather name="alert-circle" size={21} color={theme.buttonText} />
+        <ThemedText style={{ color: theme.buttonText, fontWeight: "700", marginLeft: Spacing.sm }}>
+          Find Nearby Help
         </ThemedText>
       </Pressable>
     </ScreenScrollView>
@@ -528,205 +307,30 @@ export default function AIResultsScreen() {
 }
 
 const styles = StyleSheet.create({
-  loadingContainer: {
-    flex: 1,
-    alignItems: "center",
-    justifyContent: "center",
-    padding: Spacing["3xl"],
-  },
-  loadingText: {
-    marginTop: Spacing.xl,
-    textAlign: "center",
-  },
-  loadingDescription: {
-    marginTop: Spacing.md,
-    textAlign: "center",
-    fontSize: 16,
-    lineHeight: 24,
-  },
-  errorContainer: {
-    flex: 1,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  image: {
-    width: "100%",
-    height: 250,
-    borderRadius: BorderRadius.md,
-    marginBottom: Spacing.lg,
-  },
-  summaryCard: {
-    padding: Spacing.lg,
-    borderRadius: BorderRadius.md,
-    marginBottom: Spacing.xl,
-  },
-  summaryHeader: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "flex-start",
-  },
-  titleSection: {
-    flex: 1,
-    marginRight: Spacing.lg,
-  },
-  situationType: {
-    marginBottom: Spacing.md,
-  },
-  badgesRow: {
-    flexDirection: "row",
-    flexWrap: "wrap",
-    gap: Spacing.sm,
-  },
-  badge: {
-    paddingHorizontal: Spacing.md,
-    paddingVertical: Spacing.sm,
-    borderRadius: BorderRadius.sm,
-  },
-  badgeText: {
-    fontSize: 13,
-    fontWeight: "600",
-  },
-  section: {
-    marginBottom: Spacing["2xl"],
-  },
-  sectionTitle: {
-    marginBottom: Spacing.lg,
-  },
-  equipmentGrid: {
-    padding: Spacing.lg,
-    borderRadius: BorderRadius.md,
-    marginBottom: Spacing.md,
-  },
-  equipmentItem: {
-    flexDirection: "row",
-    alignItems: "center",
-    paddingVertical: Spacing.sm,
-  },
-  equipmentText: {
-    fontSize: 15,
-  },
-  stepCard: {
-    flexDirection: "row",
-    padding: Spacing.lg,
-    borderRadius: BorderRadius.md,
-    marginBottom: Spacing.md,
-  },
-  stepNumber: {
-    width: 40,
-    height: 40,
-    borderRadius: BorderRadius.full,
-    alignItems: "center",
-    justifyContent: "center",
-    marginRight: Spacing.md,
-  },
-  stepNumberText: {
-    fontSize: 18,
-    fontWeight: "700",
-  },
-  stepContent: {
-    flex: 1,
-  },
-  stepHeader: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-    marginBottom: Spacing.sm,
-  },
-  stepTitle: {
-    flex: 1,
-  },
-  timeEstimate: {
-    fontSize: 13,
-    fontWeight: "500",
-  },
-  stepDescription: {
-    fontSize: 16,
-    lineHeight: 24,
-  },
-  tipCard: {
-    flexDirection: "row",
-    padding: Spacing.lg,
-    borderRadius: BorderRadius.md,
-    marginBottom: Spacing.md,
-    alignItems: "flex-start",
-  },
-  tipText: {
-    flex: 1,
-    fontSize: 15,
-    lineHeight: 22,
-  },
-  recoverabilityBar: {
-    paddingTop: Spacing.lg,
-    borderTopWidth: 1,
-    borderTopColor: "rgba(255,255,255,0.1)",
-  },
-  recoverabilityLabel: {
-    marginBottom: Spacing.md,
-  },
-  progressBar: {
-    height: 12,
-    borderRadius: BorderRadius.full,
-    overflow: "hidden",
-  },
-  progressFill: {
-    height: "100%",
-    borderRadius: BorderRadius.full,
-  },
-  recoverabilityText: {
-    fontSize: 14,
-    lineHeight: 20,
-    fontWeight: "500",
-  },
-  warningSection: {
-    padding: Spacing.lg,
-    borderRadius: BorderRadius.md,
-    borderWidth: 2,
-    marginBottom: Spacing.xl,
-  },
-  warningHeader: {
-    flexDirection: "row",
-    alignItems: "center",
-    marginBottom: Spacing.md,
-  },
-  warningText: {
-    fontSize: 16,
-    lineHeight: 24,
-  },
-  disclaimerSection: {
-    flexDirection: "row",
-    padding: Spacing.lg,
-    borderRadius: BorderRadius.md,
-    marginBottom: Spacing.xl,
-  },
-  disclaimerText: {
-    flex: 1,
-    marginLeft: Spacing.md,
-    fontSize: 14,
-    lineHeight: 20,
-  },
-  shareRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    padding: Spacing.lg,
-    borderRadius: BorderRadius.md,
-    marginBottom: Spacing.xl,
-  },
-  shareTextContainer: {
-    flex: 1,
-    marginRight: Spacing.md,
-  },
-  shareDescription: {
-    fontSize: 13,
-    lineHeight: 18,
-    marginTop: Spacing.xs,
-  },
-  helpButton: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "center",
-    height: Spacing.buttonHeight,
-    borderRadius: BorderRadius.md,
-    marginBottom: Spacing.xl,
-  },
+  centered: { flex: 1, alignItems: "center", justifyContent: "center", padding: Spacing["3xl"] },
+  loadingTitle: { marginTop: Spacing.lg, marginBottom: Spacing.md, textAlign: "center" },
+  errorMessage: { textAlign: "center", lineHeight: 22, marginTop: Spacing.sm },
+  image: { width: "100%", height: 250, borderRadius: BorderRadius.md, marginBottom: Spacing.lg },
+  summary: { padding: Spacing.lg, borderRadius: BorderRadius.md, marginBottom: Spacing.xl },
+  situation: { marginBottom: Spacing.md },
+  severityBadge: { flexDirection: "row", alignItems: "center", alignSelf: "flex-start", borderRadius: BorderRadius.md, paddingHorizontal: Spacing.md, paddingVertical: Spacing.sm, gap: Spacing.sm },
+  severityText: { fontSize: 15, fontWeight: "700", flexShrink: 1 },
+  limitation: { marginTop: Spacing.md, fontSize: 14, lineHeight: 21 },
+  urgentWarning: { borderWidth: 2, borderRadius: BorderRadius.md, padding: Spacing.lg, marginBottom: Spacing.xl },
+  section: { marginBottom: Spacing.xl },
+  sectionTitle: { marginBottom: Spacing.sm },
+  sectionNote: { fontSize: 13, lineHeight: 19, marginBottom: Spacing.sm },
+  card: { padding: Spacing.lg, borderRadius: BorderRadius.md },
+  listItem: { flexDirection: "row", alignItems: "flex-start", paddingVertical: Spacing.sm, gap: Spacing.sm },
+  listText: { flex: 1, fontSize: 15, lineHeight: 22 },
+  stepCard: { flexDirection: "row", alignItems: "flex-start", padding: Spacing.lg, borderRadius: BorderRadius.md, marginTop: Spacing.sm, gap: Spacing.md },
+  stepNumber: { width: 30, height: 30, borderRadius: 15, alignItems: "center", justifyContent: "center" },
+  warningCard: { flexDirection: "row", alignItems: "flex-start", padding: Spacing.md, borderRadius: BorderRadius.md, marginTop: Spacing.sm },
+  disclaimer: { flexDirection: "row", alignItems: "flex-start", padding: Spacing.lg, borderRadius: BorderRadius.md, marginBottom: Spacing.xl, gap: Spacing.md },
+  disclaimerText: { flex: 1, fontSize: 14, lineHeight: 21 },
+  shareRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", padding: Spacing.lg, borderRadius: BorderRadius.md, marginBottom: Spacing.xl },
+  shareCopy: { flex: 1, marginRight: Spacing.md },
+  actionButton: { minHeight: 52, borderRadius: BorderRadius.md, paddingHorizontal: Spacing.lg, paddingVertical: Spacing.md, alignItems: "center", justifyContent: "center", flexDirection: "row" },
+  textButton: { padding: Spacing.lg },
+  helpButton: { marginBottom: Spacing.xl },
 });
