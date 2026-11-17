@@ -21,6 +21,7 @@ import type { ProfileStackParamList } from "@/navigation/ProfileStackNavigator";
 import type { RootStackParamList } from "@/navigation/RootNavigator";
 import { useSubscription } from "@/contexts/SubscriptionContext";
 import { useAuth } from "@/contexts/AuthContext";
+import { authService } from "@/services/authService";
 import { LoadingSkeleton } from "@/components/LoadingSkeleton";
 import { ErrorState } from "@/components/ErrorState";
 import {
@@ -55,7 +56,7 @@ export default function ProfileScreen() {
     useNavigation<NativeStackNavigationProp<RootStackParamList>>();
   const { theme } = useTheme();
   const { isPremium } = useSubscription();
-  const { isAuthenticated, user, signOut } = useAuth();
+  const { isAuthenticated, user } = useAuth();
   const [profile, setProfile] = useState<UserProfile>({
     id: "1",
     name: "",
@@ -192,27 +193,6 @@ export default function ProfileScreen() {
     const updatedProfile = { ...profile, customPhotoUri: undefined };
     setProfile(updatedProfile);
     await storage.saveUserProfile(updatedProfile);
-  };
-
-  const handleSignOut = () => {
-    Alert.alert(
-      "Sign Out",
-      "Everything saved on this device stays. Shared trails, nearby offroaders, and community scans will be hidden until you sign back in.",
-      [
-        { text: "Cancel", style: "cancel" },
-        {
-          text: "Sign Out",
-          style: "destructive",
-          onPress: async () => {
-            try {
-              await signOut();
-            } catch (error: any) {
-              Alert.alert("Sign Out Failed", error.message);
-            }
-          },
-        },
-      ],
-    );
   };
 
   const toggleEquipment = async (equipmentId: string) => {
@@ -818,44 +798,49 @@ export default function ProfileScreen() {
             Account
           </ThemedText>
           {isAuthenticated ? (
-            <Pressable
+            <View
               style={[
                 styles.menuItem,
                 { backgroundColor: theme.backgroundDefault },
               ]}
-              onPress={handleSignOut}
-              android_ripple={{ color: theme.backgroundSecondary }}
             >
               <View style={styles.accountItemContent}>
-                <Feather name="log-out" size={24} color={theme.primary} />
+                <Feather name="users" size={24} color={theme.primary} />
                 <View style={styles.accountTextGroup}>
-                  <ThemedText style={styles.accountLabel}>Sign Out</ThemedText>
+                  <ThemedText style={styles.accountLabel}>
+                    {user?.displayName || profile.name || "Community Member"}
+                  </ThemedText>
                   <ThemedText
                     style={[
                       styles.accountSubtext,
                       { color: theme.tabIconDefault },
                     ]}
-                    numberOfLines={1}
                   >
-                    {user?.email}
+                    Adventure Time community member
                   </ThemedText>
                 </View>
               </View>
-            </Pressable>
+              <Feather name="check-circle" size={24} color={theme.success} />
+            </View>
           ) : (
             <Pressable
               style={[
                 styles.menuItem,
                 { backgroundColor: theme.backgroundDefault },
               ]}
-              onPress={() => rootNavigation.navigate("Auth")}
+              onPress={() => {
+                authService.ensureCommunityAccount().catch((error) => {
+                  console.error("Community join failed:", error);
+                  rootNavigation.navigate("Auth");
+                });
+              }}
               android_ripple={{ color: theme.backgroundSecondary }}
             >
               <View style={styles.accountItemContent}>
-                <Feather name="log-in" size={24} color={theme.primary} />
+                <Feather name="users" size={24} color={theme.primary} />
                 <View style={styles.accountTextGroup}>
                   <ThemedText style={styles.accountLabel}>
-                    Sign In / Create Account
+                    Join the Community
                   </ThemedText>
                   <ThemedText
                     style={[
@@ -863,8 +848,8 @@ export default function ProfileScreen() {
                       { color: theme.tabIconDefault },
                     ]}
                   >
-                    Unlocks nearby offroaders, shared trails, and community
-                    scans
+                    Get your member username and unlock nearby offroaders,
+                    shared trails, and community scans
                   </ThemedText>
                 </View>
               </View>

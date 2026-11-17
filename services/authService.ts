@@ -91,6 +91,99 @@ class AuthService {
     await signInAnonymously(this.auth);
   }
 
+  // Installing the app is joining the community: every user gets a generated
+  // username and a real (password-provider) account so the database rules,
+  // which reject anonymous sessions, treat them as a member. Credentials are
+  // stored so signing out and back in restores the same community identity
+  // instead of minting a new account each time.
+  async ensureCommunityAccount(): Promise<UserProfile | null> {
+    if (!this.auth) return null;
+
+    try {
+      const current = this.auth.currentUser;
+      if (current && !current.isAnonymous) {
+        return this.getUserProfile(current.uid);
+      }
+
+      const stored = await AsyncStorage.getItem(
+        AuthService.COMMUNITY_ACCOUNT_KEY,
+      );
+      if (stored) {
+        const { email, password } = JSON.parse(stored);
+        const credential = await signInWithEmailAndPassword(
+          this.auth,
+          email,
+          password,
+        );
+        return this.getUserProfile(credential.user.uid);
+      }
+
+      const username = AuthService.generateCommunityUsername();
+      const email = `${username.toLowerCase()}-${Date.now().toString(36)}@members.itsadventuretime.app`;
+      const password = AuthService.generateSecurePassword();
+
+      const profile = await this.signUpWithEmail(email, password, username);
+
+      await AsyncStorage.setItem(
+        AuthService.COMMUNITY_ACCOUNT_KEY,
+        JSON.stringify({ email, password }),
+      );
+
+      const localProfile = await storage.getUserProfile();
+      if (localProfile && !localProfile.name) {
+        await storage.saveUserProfile({ ...localProfile, name: username });
+      }
+
+      return profile;
+    } catch (error) {
+      console.error("Community account provisioning failed:", error);
+      return null;
+    }
+  }
+
+  private static readonly COMMUNITY_ACCOUNT_KEY = "communityAccountCredentials";
+
+  private static generateCommunityUsername(): string {
+    const prefixes = [
+      "Dusty",
+      "Mud",
+      "Trail",
+      "Ridge",
+      "Canyon",
+      "Peak",
+      "River",
+      "Rock",
+      "Red",
+      "Desert",
+    ];
+    const cores = [
+      "Rider",
+      "Crawler",
+      "Explorer",
+      "Nomad",
+      "Pilot",
+      "Scout",
+      "Rover",
+      "Driver",
+      "Hog",
+      "Runner",
+    ];
+    const prefix = prefixes[Math.floor(Math.random() * prefixes.length)];
+    const core = cores[Math.floor(Math.random() * cores.length)];
+    const number = Math.floor(1000 + Math.random() * 9000);
+    return `${prefix}${core}_${number}`;
+  }
+
+  private static generateSecurePassword(): string {
+    const chars =
+      "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!@#";
+    let password = "";
+    for (let i = 0; i < 32; i++) {
+      password += chars[Math.floor(Math.random() * chars.length)];
+    }
+    return password;
+  }
+
   async signUpWithEmail(
     email: string,
     password: string,

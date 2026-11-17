@@ -41,10 +41,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setUser(firebaseUser);
 
       if (firebaseUser?.isAnonymous) {
-        // No account yet, so there is no profile to load.
+        // No account yet, so there is no profile to load. Upgrade the guest
+        // session into a community account so installing the app is joining
+        // the community; the auth listener refires once it completes.
         setUserProfile(null);
         setIsPremium(false);
         sentryService.setUser({ id: firebaseUser.uid });
+        authService.ensureCommunityAccount().catch((error) => {
+          console.error("Community account provisioning failed:", error);
+        });
       } else if (firebaseUser) {
         try {
           // Load user profile from Firestore
